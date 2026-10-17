@@ -1,0 +1,22 @@
+[ai]
+# claude_code = Claude Code（claude -p）経由。claude.ai のサブスク内で動く（要 claude auth login）
+# api         = Claude API 経由。環境変数 ANTHROPIC_API_KEY が必要（従量課金）
+backend = "claude_code"
+model = "claude-sonnet-5-5"   # 変更可
+max_retries = 3
+# backend = "api" のとき：安全性分類で断られたらサーバー側で別モデルへ切り替える（"" で無効）
+fallbacks = "default"
+
+[voicevox]
+url = "http://127.0.0.1:50021"
+speaker_read = 3          # 読み上げ用の話者ID（alpsmemo check で確認して設定）
+speaker_sing_query = 6000 # 歌唱クエリ用ID（alpsmemo check の「歌唱クエリ用」）
+speaker_sing = 3003       # 歌唱スタイルID（alpsmemo check の「歌唱スタイル」）
+
+[music]
+mode = "sing"            # 既定の音声化モード（sing=歌唱、read=読み上げ）
+melody = "melodies/alps_verse.json"
+bpm = 110
+repeat = 1
+click = true
+transpose = 0             # 移調（半音単位）

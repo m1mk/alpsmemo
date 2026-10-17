@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpsmemo"
+version = "0.1.0"
+description = "覚えたい文章をアルプス一万尺の替え歌にして VOICEVOX で音声化するツール"
+requires-python = ">=3.11"
+dependencies = ["anthropic", "requests"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+alpsmemo = "alpsmemo.cli:main"
+
+[project.gui-scripts]
+alpsmemo-gui = "alpsmemo.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
