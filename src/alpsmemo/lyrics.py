@@ -254,14 +254,41 @@ def call_json(client, cfg: Config, system: str, user: str, schema: dict) -> dict
     return _parse_json(text)
 
 
+def _client_for(cfg: Config, client):
+    return make_client() if client is None and cfg.backend == "api" else client
+
+
+def _fix_until_valid(client, cfg: Config, system: str, block: dict, text: str, melody: Melody,
+                     log: Callable[[str], None], label: str) -> dict:
+    """ブロックを検証し、不合格なら作り直しを依頼する（最大 max_retries 回）。結果に needs_review / errors を付ける。"""
+    desc = _melody_desc(melody)
+    fix_template = _load_prompt(cfg, "lyrics_fix.md")
+    errors = validate_block(block, melody.phrase_lengths, text)
+    attempt = 0
+    while errors and attempt < cfg.max_retries:
+        attempt += 1
+        log(f"  {label}: 不合格 → 作り直し（{attempt}/{cfg.max_retries}回目）")
+        for e in errors:
+            log(f"    - {e}")
+        fix_user = _fill(
+            fix_template, TEXT=text,
+            BLOCK_JSON=json.dumps(block, ensure_ascii=False, indent=2),
+            ERRORS="\n".join(f"- {e}" for e in errors), **desc,
+        )
+        block = call_json(client, cfg, system, fix_user, BLOCK_SCHEMA)
+        errors = validate_block(block, melody.phrase_lengths, text)
+    block["needs_review"] = bool(errors)
+    block["errors"] = errors
+    log(f"  {label}: {'要確認（自動修正できませんでした）' if errors else 'OK'}")
+    return block
+
+
 def generate(text: str, melody: Melody, cfg: Config, client=None, log: Callable[[str], None] = print) -> dict:
     """文章から歌詞を生成し、検証・リトライ済みの lyrics データを返す。"""
-    if client is None and cfg.backend == "api":
-        client = make_client()
+    client = _client_for(cfg, client)
     desc = _melody_desc(melody)
     system = _fill(_load_prompt(cfg, "lyrics_system.md"), **desc)
     user = _fill(_load_prompt(cfg, "lyrics_user.md"), TEXT=text, **desc)
-    fix_template = _load_prompt(cfg, "lyrics_fix.md")
 
     log("歌詞を生成しています…")
     result = call_json(client, cfg, system, user, LYRICS_SCHEMA)
@@ -270,24 +297,7 @@ def generate(text: str, melody: Melody, cfg: Config, client=None, log: Callable[
         raise LyricsError("AIがブロックを1つも返しませんでした。入力の文章を確認して、もう一度実行してください。")
 
     for idx, block in enumerate(blocks, 1):
-        errors = validate_block(block, melody.phrase_lengths, text)
-        attempt = 0
-        while errors and attempt < cfg.max_retries:
-            attempt += 1
-            log(f"  ブロック{idx}: 不合格 → 作り直し（{attempt}/{cfg.max_retries}回目）")
-            for e in errors:
-                log(f"    - {e}")
-            fix_user = _fill(
-                fix_template, TEXT=text,
-                BLOCK_JSON=json.dumps(block, ensure_ascii=False, indent=2),
-                ERRORS="\n".join(f"- {e}" for e in errors), **desc,
-            )
-            block = call_json(client, cfg, system, fix_user, BLOCK_SCHEMA)
-            errors = validate_block(block, melody.phrase_lengths, text)
-        block["needs_review"] = bool(errors)
-        block["errors"] = errors
-        blocks[idx - 1] = block
-        log(f"  ブロック{idx}: {'要確認（自動修正できませんでした）' if errors else 'OK'}")
+        blocks[idx - 1] = _fix_until_valid(client, cfg, system, block, text, melody, log, f"ブロック{idx}")
 
     return {
         "melody": melody.name,
@@ -295,6 +305,29 @@ def generate(text: str, melody: Melody, cfg: Config, client=None, log: Callable[
         "input": text,
         "blocks": blocks,
     }
+
+
+def rewrite_block(block: dict, text: str, melody: Melody, cfg: Config, instruction: str = "",
+                  client=None, log: Callable[[str], None] = print) -> dict:
+    """人が手直しした1ブロックを、その文面と指示を尊重して AI に整えてもらう（音数合わせ・読み付け）。
+
+    block には手直し後の display / morae（音数が合っていなくてよい）を入れる。
+    戻り値は検証・リトライ済みのブロック（needs_review / errors 付き）。
+    """
+    client = _client_for(cfg, client)
+    desc = _melody_desc(melody)
+    system = _fill(_load_prompt(cfg, "lyrics_system.md"), **desc)
+    current = {k: block[k] for k in ("source", "keywords", "lines") if k in block}
+    shape = validate_shape(current, melody.phrase_lengths)
+    user = _fill(
+        _load_prompt(cfg, "lyrics_edit.md"), TEXT=text,
+        INSTRUCTION=instruction.strip() or "（指示なし。手直しした文面を活かして音数を合わせてください）",
+        BLOCK_JSON=json.dumps(current, ensure_ascii=False, indent=2),
+        ERRORS="\n".join(f"- {e}" for e in shape) or "- （音数は合っています）", **desc,
+    )
+    log("AIにブロックを直してもらっています…")
+    result = call_json(client, cfg, system, user, BLOCK_SCHEMA)
+    return _fix_until_valid(client, cfg, system, result, text, melody, log, "直したブロック")
 
 
 # ---------------------------------------------------------------- 入出力

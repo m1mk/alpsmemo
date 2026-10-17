@@ -72,3 +72,60 @@ def vowel_of(mora: str) -> str | None:
     if not mora:
         return None
     return _VOWEL_OF_CHAR.get(mora[-1])
+
+
+# ---------------------------------------------------------------- 音数合わせ（人が歌詞を短くしたとき用）
+
+def can_stretch(mora: str) -> bool:
+    """この音の後ろに「ー」を足して伸ばせるか（母音のある音か、すでに伸ばしている「ー」）。"""
+    return mora == LONG_MARK or vowel_of(mora) is not None
+
+
+def fill_rest(morae: list[str], need: int) -> list[str]:
+    """足りない分を休符（＿）で埋める。"""
+    if len(morae) > need:
+        raise ValueError(f"{len(morae)}音あります（{need}音まで）")
+    return list(morae) + [REST] * (need - len(morae))
+
+
+def fill_stretch(morae: list[str], need: int) -> list[str]:
+    """足りない分を、母音のある音の後ろに「ー」を入れて均等に伸ばす。
+
+    歌唱では「ー」は直前の母音で歌うので、休符にせずメロディが続く。
+    伸ばせる音がない（ッ・ン・休符だけ）ときは休符で埋める。
+    余りは後ろの音ほど多く配る（行末の音が一番長く伸びる）。
+    """
+    if len(morae) > need:
+        raise ValueError(f"{len(morae)}音あります（{need}音まで）")
+    extra = need - len(morae)
+    idx = [i for i, m in enumerate(morae) if can_stretch(m)]
+    if not extra:
+        return list(morae)
+    if not idx:
+        return fill_rest(morae, need)
+    k = len(idx)
+    add = {i: (j + 1) * extra // k - j * extra // k for j, i in enumerate(idx)}
+    out: list[str] = []
+    for i, m in enumerate(morae):
+        out.append(m)
+        out.extend([LONG_MARK] * add.get(i, 0))
+    return out
+
+
+def fill_repeat(morae: list[str], need: int) -> list[str]:
+    """読みをまるごと繰り返して埋め、端数は伸ばして埋める（例: イツカ → イツカイツカ）。"""
+    if len(morae) > need:
+        raise ValueError(f"{len(morae)}音あります（{need}音まで）")
+    body = [m for m in morae if m != REST]
+    if not body:
+        return fill_rest(morae, need)
+    times = max(1, need // len(body))
+    return fill_stretch(body * times, need)
+
+
+def reading_from_kana(kana: str) -> str:
+    """VOICEVOX の audio_query が返す kana（AquesTalk風記法）を、読みのカタカナだけにする。
+
+    例: "ジュ'ーゴド/ナラ" → "ジューゴドナラ"、"_ス'キ" → "スキ"（_ は無声化の印）。
+    """
+    return "".join(ch for ch in kana if ch not in "'/_、？?" and not ch.isspace())

@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 from alpsmemo.config import PROJECT_ROOT, Config, load_melody
-from alpsmemo.lyrics import generate, load_lyrics, save_lyrics, validate_block
+from alpsmemo.lyrics import generate, load_lyrics, rewrite_block, save_lyrics, validate_block
 
 MELODY = load_melody(PROJECT_ROOT / "melodies" / "alps_verse.json")
 ORIGINAL = "普通ポルトランドセメントの湿潤養生期間は、日平均気温15℃以上で5日以上とする。"
@@ -169,6 +169,33 @@ def test_claude_code_login_error(monkeypatch):
     cfg.backend = "claude_code"
     with pytest.raises(lyr.LyricsError, match="claude auth login"):
         generate(ORIGINAL, MELODY, cfg, log=lambda s: None)
+
+
+def test_rewrite_block_sends_edits_and_instruction():
+    """手直し中のブロック（音数が合っていない）と指示を AI に渡し、検証済みのブロックを返す。"""
+    edited = good_block()
+    edited["lines"][1] = line("5日", ["イ", "ツ", "カ"])  # 人が短くした
+    edited["needs_review"] = True
+    client = FakeClient([good_block()])
+    out = rewrite_block(edited, ORIGINAL, MELODY, _cfg(), "2行目を短くしたので合わせて", client=client, log=lambda s: None)
+    assert out["needs_review"] is False and out["errors"] == []
+    assert len(client.calls) == 1
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "2行目を短くしたので合わせて" in prompt
+    assert "2行目: 3音です。6音必要です（3音少ない）" in prompt
+    assert '"イ",' in prompt and "needs_review" not in prompt
+    assert client.calls[0]["output_config"]["format"]["schema"]["required"] == ["source", "keywords", "lines"]
+
+
+def test_rewrite_block_retries_when_result_invalid():
+    edited = good_block()
+    bad = good_block()
+    bad["lines"][0]["morae"] = bad["lines"][0]["morae"][:7]
+    client = FakeClient([bad, good_block()])
+    out = rewrite_block(edited, ORIGINAL, MELODY, _cfg(), "", client=client, log=lambda s: None)
+    assert out["needs_review"] is False
+    assert len(client.calls) == 2
+    assert "指示なし" in client.calls[0]["messages"][0]["content"]
 
 
 def test_number_from_other_block_rejected():
