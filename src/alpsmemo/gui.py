@@ -22,7 +22,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .cli import _anthropic_message
-from .config import PROJECT_ROOT, ConfigError, load_config, load_melody
+from .config import PROJECT_ROOT, ConfigError, Melody, list_melodies, load_config, load_melody, melody_for_lyrics
 from .lyrics import LyricsError, generate, list_themes, load_lyrics, rewrite_block, save_lyrics, validate_block, validate_shape
 from .mora import LONG_MARK, REST, MoraError, fill_repeat, fill_rest, fill_stretch, reading_from_kana, split_morae
 from .render_read import RenderError as ReadRenderError
@@ -43,7 +43,8 @@ class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.cfg = load_config()
-        self.melody = load_melody(self.cfg.resolve(self.cfg.melody)).transposed(self.cfg.transpose)
+        self.melodies = list_melodies(self.cfg) or [load_melody(self.cfg.resolve(self.cfg.melody))]
+        self.melody: Melody = self.melodies[0].transposed(self.cfg.transpose)  # 開いている歌詞（編集パネル）の曲
         self.out_dir: Path | None = None
         self.data: dict | None = None
         self.queue: queue.Queue = queue.Queue()
@@ -106,6 +107,16 @@ class App:
         f1.pack(fill="x")
         self.input = tk.Text(f1, height=5, wrap="char", font=(FONT, 11))
         self.input.pack(fill="x")
+        song = ttk.Frame(f1)
+        song.pack(fill="x", pady=(6, 0))
+        ttk.Label(song, text="曲").pack(side="left")
+        self.song_var = tk.StringVar(value=self.melodies[0].label)
+        self.song_box = ttk.Combobox(song, textvariable=self.song_var, values=[m.label for m in self.melodies],
+                                     width=36, state="readonly")
+        self.song_box.pack(side="left", padx=(4, 8))
+        self.song_desc = tk.StringVar(value=self.melodies[0].description)
+        ttk.Label(song, textvariable=self.song_desc, foreground="#666", wraplength=420).pack(side="left")
+        self.song_box.bind("<<ComboboxSelected>>", lambda e: self.song_desc.set(self.chosen_melody().description))
         self.btn_lyrics = ttk.Button(f1, text="歌詞を作る", style="Big.TButton", command=self.make_lyrics)
         self.btn_lyrics.pack(anchor="e", pady=(6, 0))
 
@@ -209,12 +220,33 @@ class App:
         for v in (self.src_var, self.kw_var):
             v.trace_add("write", lambda *_: self._refresh_dirty())
 
+        self.lines_frame = ttk.Frame(f3)
+        self.lines_frame.pack(fill="x", pady=(6, 0))
+        self._build_lines()
+
+        self.edit_info = tk.StringVar()
+        ttk.Label(f3, textvariable=self.edit_info, wraplength=600, justify="left", foreground="#8a6d00").pack(fill="x", pady=(4, 0))
+
+        bar = ttk.Frame(f3)
+        bar.pack(fill="x", pady=(6, 0))
+        self.btn_save = ttk.Button(bar, text="このブロックを保存", style="Big.TButton", command=self.save_block)
+        self.btn_save.pack(side="left")
+        ttk.Button(bar, text="元に戻す", command=self.revert_block).pack(side="left", padx=(6, 12))
+        self.btn_ai = ttk.Button(bar, text="AIに直してもらう…", command=self.ai_rewrite)
+        self.btn_ai.pack(side="left")
+        ttk.Button(bar, text="このブロックを削除", command=self.delete_block).pack(side="right")
+        ttk.Button(bar, text="確認済みにする", command=self.confirm_block).pack(side="right", padx=6)
+        self.set_editor_enabled(False)
+
+    def _build_lines(self) -> None:
+        """編集パネルの行（曲の行数ぶん）を作る。曲が変わったら作り直す。"""
+        for w in self.lines_frame.winfo_children():
+            w.destroy()
         self.edit_vars: list[tuple[tk.StringVar, tk.StringVar]] = []
         self.edit_entries: list[tuple[ttk.Entry, ttk.Entry]] = []
         self.count_labels: list[ttk.Label] = []
         self.strips: list[tk.Canvas] = []
-        lines = ttk.Frame(f3)
-        lines.pack(fill="x", pady=(6, 0))
+        lines = self.lines_frame
         lines.columnconfigure(1, weight=2)
         lines.columnconfigure(2, weight=3)
         for li, need in enumerate(self.melody.phrase_lengths):
@@ -248,18 +280,22 @@ class App:
         ttk.Label(lines, text="読み（カタカナ。ー＝前の音を伸ばす、＿＝休符）", foreground="#666").grid(
             row=len(self.melody.phrase_lengths) * 2, column=2, columnspan=2, sticky="w", padx=2)
 
-        self.edit_info = tk.StringVar()
-        ttk.Label(f3, textvariable=self.edit_info, wraplength=600, justify="left", foreground="#8a6d00").pack(fill="x", pady=(4, 0))
+    def chosen_melody(self) -> Melody:
+        """「曲」で選んでいる曲（次に歌詞を作るときの曲）。"""
+        label = self.song_var.get()
+        m = next((m for m in self.melodies if m.label == label), self.melodies[0])
+        return m.transposed(self.cfg.transpose)
 
-        bar = ttk.Frame(f3)
-        bar.pack(fill="x", pady=(6, 0))
-        self.btn_save = ttk.Button(bar, text="このブロックを保存", style="Big.TButton", command=self.save_block)
-        self.btn_save.pack(side="left")
-        ttk.Button(bar, text="元に戻す", command=self.revert_block).pack(side="left", padx=(6, 12))
-        self.btn_ai = ttk.Button(bar, text="AIに直してもらう…", command=self.ai_rewrite)
-        self.btn_ai.pack(side="left")
-        ttk.Button(bar, text="このブロックを削除", command=self.delete_block).pack(side="right")
-        ttk.Button(bar, text="確認済みにする", command=self.confirm_block).pack(side="right", padx=6)
+    def set_melody(self, melody: Melody) -> None:
+        """開いている歌詞の曲を切り替える（編集パネルを曲の行数で作り直す）。"""
+        self.melody = melody
+        label = next((m.label for m in self.melodies if m.path == melody.path), None)
+        if label:
+            self.song_var.set(label)
+            self.song_desc.set(melody.description)
+        if melody.bpm:
+            self.bpm.set(int(melody.bpm))
+        self._build_lines()
         self.set_editor_enabled(False)
 
     # ------------------------------------------------------------ 共通
@@ -331,8 +367,10 @@ class App:
                 "上書きの確認", f"「{theme}」の歌詞はもうあります。作り直して上書きしますか？"):
             return
 
+        melody = self.chosen_melody()
+
         def work(log):
-            data = generate(text, self.melody, self.cfg, log=log)
+            data = generate(text, melody, self.cfg, log=log)
             save_lyrics(data, out_dir)
             return out_dir
 
@@ -352,10 +390,10 @@ class App:
         frm = ttk.Frame(win, padding=10)
         frm.pack(fill="both", expand=True)
         ttk.Label(frm, text=f"保存先：{OUT_ROOT}　（新しい順。ダブルクリックで開く）", foreground="#555").pack(anchor="w")
-        cols = ("name", "updated", "blocks", "review", "audio", "preview")
+        cols = ("name", "melody", "updated", "blocks", "review", "audio", "preview")
         tree = ttk.Treeview(frm, columns=cols, show="headings", selectmode="browse", height=12)
-        for c, label, w, anchor in zip(cols, ("テーマ名", "更新日時", "ブロック", "要確認", "音声", "冒頭の歌詞"),
-                                       (180, 130, 60, 60, 90, 300), ("w", "center", "center", "center", "center", "w")):
+        for c, label, w, anchor in zip(cols, ("テーマ名", "曲", "更新日時", "ブロック", "要確認", "音声", "冒頭の歌詞"),
+                                       (160, 120, 120, 60, 60, 80, 260), ("w", "w", "center", "center", "center", "center", "w")):
             tree.heading(c, text=label)
             tree.column(c, width=w, anchor=anchor, stretch=c in ("name", "preview"))
         tree.tag_configure("review", background="#fff3c4")
@@ -371,7 +409,7 @@ class App:
             iid = str(i)
             by_iid[iid] = t
             tree.insert("", "end", iid=iid, tags=tags, values=(
-                t["name"], time.strftime("%Y/%m/%d %H:%M", time.localtime(t["updated"])), t["blocks"],
+                t["name"], t["melody"], time.strftime("%Y/%m/%d %H:%M", time.localtime(t["updated"])), t["blocks"],
                 t["review"] or "", audio, t["preview"] if not t["broken"] else "（lyrics.json が壊れています）"))
         tree.selection_set("0")
 
@@ -439,6 +477,9 @@ class App:
         self.where.set(f"保存先：{out_dir}　歌詞と音声はここへ自動保存されます")
         self.data = load_lyrics(out_dir)
         self.theme.set(out_dir.name)
+        melody = melody_for_lyrics(self.cfg, self.data).transposed(self.cfg.transpose)
+        if melody.path != self.melody.path or melody.phrase_lengths != self.melody.phrase_lengths:
+            self.set_melody(melody)
         if self.data.get("input"):
             self.input.delete("1.0", "end")
             self.input.insert("1.0", self.data["input"])

@@ -90,6 +90,15 @@ class Melody:
     bpm: float | None
     phrases: list[list[tuple[int | None, float]]]  # 各フレーズ = [(key, beats), ...]、key=None は休符
     beats_per_bar: int = 2  # 4分の2拍子
+    title: str = ""  # 画面に出す曲名
+    description: str = ""  # どんな内容に向くか
+    verified: bool = True  # False = 楽譜なしの書き起こしで、音程が要確認
+    path: Path | None = None  # 読み込んだファイル
+
+    @property
+    def label(self) -> str:
+        """画面用の曲名（音数つき）。"""
+        return f"{self.title or self.name}（{'・'.join(map(str, self.phrase_lengths))}音）" + ("" if self.verified else "　※音程は要確認")
 
     @property
     def phrase_lengths(self) -> list[int]:
@@ -124,7 +133,8 @@ class Melody:
     def transposed(self, semitones: int) -> "Melody":
         if not semitones:
             return self
-        return Melody(self.name, self.bpm, [[(None if k is None else k + semitones, b) for k, b in p] for p in self.phrases], self.beats_per_bar)
+        return Melody(self.name, self.bpm, [[(None if k is None else k + semitones, b) for k, b in p] for p in self.phrases],
+                      self.beats_per_bar, self.title, self.description, self.verified, self.path)
 
 
 
@@ -152,4 +162,39 @@ def load_melody(path: Path) -> Melody:
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         raise ConfigError(f"メロディファイルの形式が正しくありません（{path}）: {e}\n→ notes は [key, beats] の配列にしてください。") from e
     return Melody(name=data.get("name", path.stem), bpm=data.get("bpm"), phrases=phrases,
-                  beats_per_bar=int(data.get("beats_per_bar", 2)))
+                  beats_per_bar=int(data.get("beats_per_bar", 2)), title=str(data.get("title", "")),
+                  description=str(data.get("description", "")), verified=bool(data.get("verified", True)), path=path)
+
+
+def list_melodies(cfg: Config) -> list[Melody]:
+    """melodies フォルダ（config.toml の melody と同じフォルダ）の曲を、既定の曲を先頭にして返す。"""
+    default = cfg.resolve(cfg.melody)
+    folder = default.parent
+    melodies = []
+    for p in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        try:
+            melodies.append(load_melody(p))
+        except ConfigError:
+            continue
+    melodies.sort(key=lambda m: m.path != default)
+    return melodies
+
+
+def melody_for_lyrics(cfg: Config, data: dict, explicit: str | None = None) -> Melody:
+    """歌詞データ（lyrics.json）を作ったときの曲を返す。explicit があればそれを優先。
+
+    lyrics.json の melody_file（melodies フォルダからの相対パス）を見る。古い歌詞（melody_file なし）は
+    config.toml の既定の曲を使い、音数が合わない場合はフォルダ内から音数の合う曲を探す。
+    """
+    if explicit:
+        return load_melody(cfg.resolve(explicit))
+    folder = cfg.resolve(cfg.melody).parent
+    if data.get("melody_file"):
+        return load_melody(folder / data["melody_file"])
+    melody = load_melody(cfg.resolve(cfg.melody))
+    lengths = data.get("phrase_lengths")
+    if lengths and melody.phrase_lengths != lengths:
+        for m in list_melodies(cfg):
+            if m.phrase_lengths == lengths:
+                return m
+    return melody

@@ -1,5 +1,8 @@
 {
   "name": "alps_ichimanjaku_verse",
+  "title": "アルプス一万尺",
+  "description": "8・6・8・6音の4行。標準の曲",
+  "verified": true,
   "bpm": 110,
   "beats_per_bar": 2,
   "phrases": [

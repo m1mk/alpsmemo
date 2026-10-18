@@ -6,8 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from .config import Config, ConfigError, load_config, load_melody
-from .lyrics import LyricsError, generate, save_lyrics
+from .config import Config, ConfigError, list_melodies, load_config, load_melody, melody_for_lyrics
+from .lyrics import LyricsError, generate, load_lyrics, save_lyrics
 from .render_read import RenderError as ReadRenderError
 from .render_sing import RenderError as SingRenderError
 from .synth import synthesize
@@ -33,9 +33,13 @@ def _read_input(path: str) -> str:
     return text
 
 
+def _transpose(cfg: Config, args) -> int:
+    return args.transpose if args.transpose is not None else cfg.transpose
+
+
 def _melody(cfg: Config, args):
     path = cfg.resolve(args.melody) if getattr(args, "melody", None) else cfg.resolve(cfg.melody)
-    return load_melody(path).transposed(args.transpose if args.transpose is not None else cfg.transpose)
+    return load_melody(path).transposed(_transpose(cfg, args))
 
 
 def cmd_lyrics(args, cfg: Config) -> int:
@@ -57,7 +61,8 @@ def cmd_lyrics(args, cfg: Config) -> int:
 
 
 def cmd_synth(args, cfg: Config) -> int:
-    melody = _melody(cfg, args)
+    # 歌詞を作ったときの曲で音声化する（--melody で上書き可）
+    melody = melody_for_lyrics(cfg, load_lyrics(Path(args.dir)), getattr(args, "melody", None)).transposed(_transpose(cfg, args))
     mode = args.mode or cfg.mode
     bpm = args.bpm or cfg.bpm
     repeat = args.repeat or cfg.repeat
@@ -131,6 +136,15 @@ def cmd_check(args, cfg: Config) -> int:
     return 0
 
 
+def cmd_melodies(args, cfg: Config) -> int:
+    print("■ 使える曲（--melody に指定するファイル名）")
+    for m in list_melodies(cfg):
+        print(f"  {m.path.name:<20} {m.label}")
+        if m.description:
+            print(f"  {'':<20} {m.description}")
+    return 0
+
+
 def cmd_gui(args, cfg: Config) -> int:
     from .gui import main as gui_main
 
@@ -143,7 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--melody", help="メロディファイル（例: melodies/alps_verse.json）")
+    common.add_argument("--melody", help="曲のファイル（例: melodies/twinkle.json。一覧は alpsmemo melodies）")
     common.add_argument("--transpose", type=int, help="移調（半音単位、例: -2）")
     audio = argparse.ArgumentParser(add_help=False)
     audio.add_argument("--mode", choices=["read", "sing"], help="read=読み上げ、sing=歌唱（既定: config.toml の mode）")
@@ -168,6 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("check", help="VOICEVOXの起動確認と話者・歌唱スタイル一覧の表示")
     s.set_defaults(func=cmd_check, transpose=None)
+
+    s = sub.add_parser("melodies", help="使える曲の一覧を表示")
+    s.set_defaults(func=cmd_melodies, transpose=None)
 
     s = sub.add_parser("gui", help="簡易GUIを開く")
     s.set_defaults(func=cmd_gui, transpose=None)

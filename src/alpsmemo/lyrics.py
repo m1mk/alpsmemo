@@ -301,6 +301,8 @@ def generate(text: str, melody: Melody, cfg: Config, client=None, log: Callable[
 
     return {
         "melody": melody.name,
+        "melody_title": melody.title,
+        "melody_file": melody.path.name if melody.path else "",
         "phrase_lengths": melody.phrase_lengths,
         "input": text,
         "blocks": blocks,
@@ -375,6 +377,7 @@ def list_themes(out_root: Path) -> list[dict]:
                 break
         themes.append({
             "name": d.name,
+            "melody": data.get("melody_title") or data.get("melody", ""),
             "dir": d,
             "updated": path.stat().st_mtime,
             "blocks": len(blocks),
@@ -389,7 +392,7 @@ def list_themes(out_root: Path) -> list[dict]:
 
 def write_lyrics_txt(data: dict, path: Path) -> None:
     lengths = data.get("phrase_lengths", [])
-    out = [f"メロディ: {data.get('melody', '')}（{'・'.join(map(str, lengths))}音）", ""]
+    out = [f"曲: {data.get('melody_title') or data.get('melody', '')}（{'・'.join(map(str, lengths))}音）", ""]
     for i, block in enumerate(data.get("blocks", []), 1):
         mark = "  ★要確認" if block.get("needs_review") else ""
         out.append(f"【ブロック{i}】{mark}")
