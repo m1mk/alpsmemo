@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 from alpsmemo.config import PROJECT_ROOT, Config, load_melody
-from alpsmemo.lyrics import generate, load_lyrics, rewrite_block, save_lyrics, validate_block
+from alpsmemo.lyrics import generate, list_themes, load_lyrics, rewrite_block, save_lyrics, validate_block
 
 MELODY = load_melody(PROJECT_ROOT / "melodies" / "alps_verse.json")
 ORIGINAL = "普通ポルトランドセメントの湿潤養生期間は、日平均気温15℃以上で5日以上とする。"
@@ -134,6 +134,32 @@ def test_save_and_load_accepts_morae_string(tmp_path):
     loaded = load_lyrics(tmp_path)
     assert loaded["blocks"][0]["lines"][1]["morae"] == ["イ", "ツ", "カ", "イ", "ジョ", "ウ"]
     assert "ブロック1" in (tmp_path / "lyrics.txt").read_text(encoding="utf-8")
+
+
+def test_list_themes(tmp_path):
+    import os
+    import time
+
+    assert list_themes(tmp_path / "nothing") == []
+    old = {"melody": "m", "phrase_lengths": [8, 6, 8, 6], "blocks": [good_block(), dict(good_block(), needs_review=True)]}
+    save_lyrics(old, tmp_path / "古い")
+    (tmp_path / "古い" / "sing").mkdir()
+    (tmp_path / "古い" / "sing" / "all.wav").write_bytes(b"")
+    t = time.time() - 100
+    os.utime(tmp_path / "古い" / "lyrics.json", (t, t))
+    save_lyrics({"melody": "m", "phrase_lengths": [8, 6, 8, 6], "blocks": [good_block()]}, tmp_path / "新しい")
+    (tmp_path / "壊れた").mkdir()
+    (tmp_path / "壊れた" / "lyrics.json").write_text("{", encoding="utf-8")
+    (tmp_path / "関係ないフォルダ").mkdir()
+
+    themes = list_themes(tmp_path)
+    assert [t["name"] for t in themes] == ["新しい", "壊れた", "古い"] or [t["name"] for t in themes][2] == "古い"
+    by = {t["name"]: t for t in themes}
+    assert by["古い"]["blocks"] == 2 and by["古い"]["review"] == 1 and by["古い"]["audio"] == ["sing"]
+    assert by["古い"]["preview"] == "15℃なら" and by["古い"]["dir"] == tmp_path / "古い"
+    assert by["新しい"]["audio"] == [] and by["新しい"]["review"] == 0
+    assert by["壊れた"]["broken"] is True and by["壊れた"]["blocks"] == 0
+    assert "関係ないフォルダ" not in by
 
 
 def _fake_run(payloads, calls):

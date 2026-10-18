@@ -11,6 +11,7 @@ import queue
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -22,7 +23,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .cli import _anthropic_message
 from .config import PROJECT_ROOT, ConfigError, load_config, load_melody
-from .lyrics import LyricsError, generate, load_lyrics, rewrite_block, save_lyrics, validate_block, validate_shape
+from .lyrics import LyricsError, generate, list_themes, load_lyrics, rewrite_block, save_lyrics, validate_block, validate_shape
 from .mora import LONG_MARK, REST, MoraError, fill_repeat, fill_rest, fill_stretch, reading_from_kana, split_morae
 from .render_read import RenderError as ReadRenderError
 from .render_sing import RenderError as SingRenderError
@@ -83,15 +84,15 @@ class App:
         ttk.Label(top, text="テーマ名").pack(side="left")
         self.theme = tk.StringVar(value="")
         ttk.Entry(top, textvariable=self.theme, width=30).pack(side="left", padx=6)
-        ttk.Button(top, text="前に作ったものを開く…", command=self.open_dir).pack(side="left", padx=6)
+        ttk.Button(top, text="作ったもの一覧…", command=self.open_list).pack(side="left", padx=6)
         self.status = tk.StringVar(value="テーマ名を入れ、文章を貼り付けて「歌詞を作る」を押してください。")
         ttk.Label(top, textvariable=self.status, foreground="#555").pack(side="left", padx=12)
 
         where = ttk.Frame(self.root, padding=(10, 0, 10, 4))
         where.pack(fill="x")
-        self.where = tk.StringVar(value=f"保存先：{OUT_ROOT / '（テーマ名）'}　※歌詞も音声も自動で保存されます")
-        ttk.Button(where, text="保存先フォルダを開く", command=self.open_folder).pack(side="left")
-        ttk.Label(where, textvariable=self.where, foreground="#555").pack(side="left", padx=8)
+        self.where = tk.StringVar(value=f"保存先：{OUT_ROOT}\\（テーマ名）　歌詞と音声はテーマごとにここへ自動保存されます")
+        ttk.Label(where, textvariable=self.where, foreground="#555").pack(side="left")
+        ttk.Button(where, text="このフォルダをエクスプローラーで見る", command=self.open_folder).pack(side="left", padx=8)
 
         pane = ttk.PanedWindow(self.root, orient="horizontal")
         pane.pack(fill="both", expand=True, padx=10)
@@ -160,8 +161,12 @@ class App:
         ttk.Button(pbar, text="選んだブロックを再生", command=self.play_selected_block).pack(side="left", padx=6)
         sbar = ttk.Frame(f5)
         sbar.pack(fill="x", pady=(6, 0))
-        ttk.Button(sbar, text="この音声を保存…", command=self.save_audio).pack(side="left")
-        ttk.Label(sbar, text="（選んでいる音声を、好きな場所に .wav で保存）", foreground="#666").pack(side="left", padx=6)
+        ttk.Button(sbar, text="この音声を別の場所にコピー…", command=self.save_audio).pack(side="left")
+        self.saved_to: Path | None = None
+        self.btn_saved = ttk.Button(sbar, text="コピー先を開く", command=self.open_saved, state="disabled")
+        self.btn_saved.pack(side="left", padx=6)
+        self.saved_label = tk.StringVar(value="（音声は保存先フォルダにもう入っています。スマホなどに渡すときにコピーしてください）")
+        ttk.Label(sbar, textvariable=self.saved_label, foreground="#666", wraplength=560).pack(side="left", padx=6)
 
         self.k_header = tk.StringVar()
         ttk.Label(f5, textvariable=self.k_header, font=(FONT, 12), foreground="#666").pack(anchor="w", pady=(10, 2))
@@ -333,20 +338,105 @@ class App:
 
         self.run_bg("歌詞を作っています…（1〜3分ほどかかります）", work, self.load_dir)
 
-    def open_dir(self) -> None:
-        if not self.ask_discard():
+    def open_list(self) -> None:
+        """作ったテーマの一覧を出し、選んだものを開く。"""
+        themes = list_themes(OUT_ROOT)
+        if not themes:
+            messagebox.showinfo("まだありません", f"作った歌詞はまだありません。\n（保存先：{OUT_ROOT}）")
             return
-        d = filedialog.askdirectory(initialdir=OUT_ROOT if OUT_ROOT.exists() else PROJECT_ROOT, title="テーマのフォルダを選ぶ")
-        if d:
+        win = tk.Toplevel(self.root)
+        win.title("作ったもの一覧")
+        win.transient(self.root)
+        win.grab_set()
+        win.geometry("900x420")
+        frm = ttk.Frame(win, padding=10)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=f"保存先：{OUT_ROOT}　（新しい順。ダブルクリックで開く）", foreground="#555").pack(anchor="w")
+        cols = ("name", "updated", "blocks", "review", "audio", "preview")
+        tree = ttk.Treeview(frm, columns=cols, show="headings", selectmode="browse", height=12)
+        for c, label, w, anchor in zip(cols, ("テーマ名", "更新日時", "ブロック", "要確認", "音声", "冒頭の歌詞"),
+                                       (180, 130, 60, 60, 90, 300), ("w", "center", "center", "center", "center", "w")):
+            tree.heading(c, text=label)
+            tree.column(c, width=w, anchor=anchor, stretch=c in ("name", "preview"))
+        tree.tag_configure("review", background="#fff3c4")
+        tree.tag_configure("broken", foreground="#c00000")
+        sb = ttk.Scrollbar(frm, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tree.pack(fill="both", expand=True, pady=6)
+        by_iid = {}
+        for i, t in enumerate(themes):
+            audio = "、".join("歌唱" if m == "sing" else "読み上げ" for m in t["audio"]) or "まだ"
+            tags = ("broken",) if t["broken"] else ("review",) if t["review"] else ()
+            iid = str(i)
+            by_iid[iid] = t
+            tree.insert("", "end", iid=iid, tags=tags, values=(
+                t["name"], time.strftime("%Y/%m/%d %H:%M", time.localtime(t["updated"])), t["blocks"],
+                t["review"] or "", audio, t["preview"] if not t["broken"] else "（lyrics.json が壊れています）"))
+        tree.selection_set("0")
+
+        def chosen():
+            sel = tree.selection()
+            return by_iid[sel[0]] if sel else None
+
+        def do_open(*_):
+            t = chosen()
+            if not t:
+                return
+            if not self.ask_discard():
+                return
+            win.destroy()
             try:
-                self.load_dir(Path(d))
+                self.load_dir(t["dir"])
             except KNOWN_ERRORS as e:
                 messagebox.showerror("開けません", str(e))
+
+        def do_explorer():
+            t = chosen()
+            if t:
+                os.startfile(t["dir"])
+
+        def do_delete():
+            t = chosen()
+            if not t:
+                return
+            if not messagebox.askyesno("削除の確認", f"「{t['name']}」の歌詞と音声をすべて削除しますか？\n元に戻せません。", parent=win):
+                return
+            shutil.rmtree(t["dir"], ignore_errors=True)
+            if self.out_dir == t["dir"]:
+                self.out_dir = None
+                self.data = None
+                self.editor_block = None
+                self.editor_saved = None
+                self.set_editor_enabled(False)
+                self.fill_tree_empty()
+                self.refresh_files()
+                self.where.set(f"保存先：{OUT_ROOT}\\（テーマ名）　歌詞と音声はテーマごとにここへ自動保存されます")
+            self.log(f"削除しました: {t['dir']}")
+            win.destroy()
+            self.open_list()
+
+        tree.bind("<Double-1>", do_open)
+        tree.bind("<Return>", do_open)
+        bar = ttk.Frame(frm)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="開く", style="Big.TButton", command=do_open).pack(side="left")
+        ttk.Button(bar, text="エクスプローラーで見る", command=do_explorer).pack(side="left", padx=6)
+        ttk.Button(bar, text="閉じる", command=win.destroy).pack(side="right")
+        ttk.Button(bar, text="削除…", command=do_delete).pack(side="right", padx=6)
+        tree.focus_set()
+
+    def fill_tree_empty(self) -> None:
+        self._selecting = True
+        try:
+            self.tree.delete(*self.tree.get_children())
+        finally:
+            self._selecting = False
 
     def load_dir(self, out_dir: Path) -> None:
         self.stop()
         self.out_dir = out_dir
-        self.where.set(f"保存先：{out_dir}（自動保存）")
+        self.where.set(f"保存先：{out_dir}　歌詞と音声はここへ自動保存されます")
         self.data = load_lyrics(out_dir)
         self.theme.set(out_dir.name)
         if self.data.get("input"):
@@ -796,8 +886,18 @@ class App:
             defaultextension=".wav", filetypes=[("WAV 音声", "*.wav")])
         if dest:
             shutil.copyfile(d / name, dest)
-            self.log(f"音声を保存しました: {dest}")
-            self.status.set(f"保存しました: {dest}")
+            self.saved_to = Path(dest)
+            self.btn_saved.configure(state="normal")
+            self.saved_label.set(f"コピーしました: {dest}")
+            self.log(f"音声をコピーしました: {dest}")
+            self.status.set(f"コピーしました: {dest}")
+
+    def open_saved(self) -> None:
+        """「別の場所にコピー」した音声の場所をエクスプローラーで開く（ファイルを選択した状態で）。"""
+        if self.saved_to and self.saved_to.exists():
+            subprocess.Popen(["explorer", "/select,", str(self.saved_to)])
+        elif self.saved_to:
+            os.startfile(self.saved_to.parent)
 
     def _audio_is_old(self, d: Path) -> bool:
         """歌詞（lyrics.json）が音声より新しい＝直した後に作り直していない。"""

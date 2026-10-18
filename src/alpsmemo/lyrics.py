@@ -351,6 +351,42 @@ def load_lyrics(out_dir: Path) -> dict:
     return data
 
 
+def list_themes(out_root: Path) -> list[dict]:
+    """out フォルダにあるテーマ（lyrics.json を持つフォルダ）の一覧を、新しい順に返す。
+
+    各要素: name / dir / updated（lyrics.json の更新時刻）/ blocks / review / audio（音声のあるモードの一覧）/ preview（冒頭の歌詞）
+    """
+    themes = []
+    if not out_root.is_dir():
+        return themes
+    for d in out_root.iterdir():
+        path = d / "lyrics.json"
+        if not d.is_dir() or not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            blocks = data.get("blocks") or []
+        except (OSError, ValueError):
+            data, blocks = {}, []
+        first = ""
+        for line in (blocks[0].get("lines") or []) if blocks else []:
+            if isinstance(line, dict) and line.get("display"):
+                first = str(line["display"])
+                break
+        themes.append({
+            "name": d.name,
+            "dir": d,
+            "updated": path.stat().st_mtime,
+            "blocks": len(blocks),
+            "review": sum(1 for b in blocks if isinstance(b, dict) and b.get("needs_review")),
+            "audio": [mode for mode in ("sing", "read") if (d / mode / "all.wav").is_file()],
+            "preview": first,
+            "broken": not data,
+        })
+    themes.sort(key=lambda t: t["updated"], reverse=True)
+    return themes
+
+
 def write_lyrics_txt(data: dict, path: Path) -> None:
     lengths = data.get("phrase_lengths", [])
     out = [f"メロディ: {data.get('melody', '')}（{'・'.join(map(str, lengths))}音）", ""]
